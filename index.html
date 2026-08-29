@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>3D Dice</title>
+<style>
+  :root { --ink: #eceadf; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink); text-align: center;
+    background: radial-gradient(120% 90% at 50% 18%, #3c4353 0%, #242935 46%, #13151b 100%);
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  /* The WebGL canvas fills the viewport; the grab cursor invites a drag. */
+  #scene { position: fixed; inset: 0; cursor: grab; touch-action: none; animation: fade-in .9s ease both; }
+  #scene.dragging { cursor: grabbing; }
+  #scene canvas { display: block; }
+  @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+  .vignette { position: fixed; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 24vmin rgba(4,6,10,.55); }
+  /* Overlay UI — pointer events pass through to the scene except on the button. */
+  .ui {
+    position: fixed; inset: 0; z-index: 3; pointer-events: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+    padding: 30px 20px 26px;
+  }
+  h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .45em; text-indent: .45em; text-transform: uppercase; color: rgba(236,234,223,.92); }
+  .subtitle { margin: 9px 0 0; font-size: 11px; letter-spacing: .22em; text-indent: .22em; text-transform: uppercase; color: rgba(236,234,223,.4); }
+  /* Result read-out — fades in after the first roll. */
+  #result { margin-top: 26px; opacity: 0; transform: translateY(-6px); transition: opacity .45s ease, transform .45s ease; }
+  #result.show { opacity: 1; transform: none; }
+  #result .label { display: block; font-size: 10.5px; letter-spacing: .3em; text-indent: .3em; text-transform: uppercase; color: rgba(236,234,223,.5); }
+  #result .value { display: block; margin-top: 6px; font-size: 62px; font-weight: 700; line-height: 1.05; text-shadow: 0 10px 34px rgba(0,0,0,.5); }
+  #result .value.pop { animation: pop .5s cubic-bezier(.2,1.4,.4,1) both; }
+  @keyframes pop { 0% { transform: scale(.55); opacity: 0 } 100% { transform: scale(1); opacity: 1 } }
+  footer { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  #history { display: flex; gap: 7px; min-height: 26px; align-items: center; }
+  #history .chip {
+    min-width: 26px; height: 26px; padding: 0 6px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600; color: rgba(236,234,223,.85);
+    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12);
+    animation: pop .4s cubic-bezier(.2,1.4,.4,1) both;
+  }
+  #rollButton {
+    pointer-events: auto; cursor: pointer; font: inherit;
+    font-size: 13px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+    color: #171a20; background: #eceadf; border: 0; border-radius: 999px; padding: 14px 38px;
+    box-shadow: 0 12px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.8);
+    transition: transform .15s ease, box-shadow .15s ease, opacity .2s ease;
+  }
+  #rollButton:hover { transform: translateY(-2px); box-shadow: 0 16px 36px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.8); }
+  #rollButton:active { transform: translateY(0) scale(.97); }
+  #rollButton:disabled { opacity: .55; cursor: default; transform: none; }
+  .hint { margin: 0; font-size: 11px; letter-spacing: .08em; color: rgba(236,234,223,.4); }
+  kbd { font: inherit; font-size: 10px; padding: 1px 5px; border-radius: 4px; border: 1px solid rgba(236,234,223,.25); background: rgba(255,255,255,.06); }
+  /* Shown only if Three.js or WebGL is unavailable. */
+  #fallback { position: fixed; inset: 0; z-index: 9; display: none; align-items: center; justify-content: center; padding: 24px; background: #16181d; }
+  #fallback p { max-width: 48ch; line-height: 1.6; color: rgba(236,234,223,.75); }
+  @media (max-height: 640px) { #result .value { font-size: 44px; } h1 { font-size: 12px; } }
+</style>
+</head>
+<body>
+  <div id="scene"></div>
+  <div class="vignette"></div>
+
+  <div class="ui">
+    <header>
+      <h1>3D Dice</h1>
+      <p class="subtitle">Vanilla Three.js &middot; drag to spin</p>
+      <div id="result" aria-live="polite">
+        <span class="label">You rolled</span>
+        <span class="value" id="resultValue">&ndash;</span>
+      </div>
+    </header>
+    <footer>
+      <div id="history" aria-label="Previous rolls"></div>
+      <button id="rollButton" type="button">Roll the die</button>
+      <p class="hint">Drag to spin &middot; tap the die or press <kbd>Space</kbd> to roll</p>
+    </footer>
+  </div>
+
+  <div id="fallback"><p></p></div>
+
+  <!-- Three.js from CDN (with a mirror fallback), then the app -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>window.THREE || document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"><\/script>');</script>
+  <script>
+  (function () {
+    'use strict';
+
+    var fallbackEl = document.getElementById('fallback');
+    function fail(msg) {
+      fallbackEl.style.display = 'flex';
+      fallbackEl.querySelector('p').textContent = msg;
+    }
+    if (!window.THREE) {
+      fail('Three.js could not be loaded from the CDN. Please check your internet connection and reload the page.');
+      return;
+    }
+
+    try {
+      /* ================================================================
+         1. SETUP — renderer, scene, camera, studio lighting
+         ================================================================ */
+      const container = document.getElementById('scene');
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.outputEncoding = THREE.sRGBEncoding;        // correct colour output
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;  // filmic, photographic response
+      renderer.toneMappingExposure = 1.18;
+      container.appendChild(renderer.domElement);
+      const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(34, window.innerWidth / window.innerHeight, 0.1, 100);
+      const CAM_DIR = new THREE.Vector3(3.6, 2.9, 4.8).normalize(); // fixed view direction…
+      const BASE_DIST = 7.8;                                        // …distance adapts to screen size
+
+      // Warm key + cool fill + rim + hemisphere ambient give the ivory plastic
+      // soft speculars. No shadow maps — the contact shadow is a sprite (below).
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4150, 0.75));
+      const keyLight = new THREE.DirectionalLight(0xfff2dd, 1.2);
+      keyLight.position.set(4.5, 7, 3.5);
+      const fillLight = new THREE.DirectionalLight(0xbcd2ff, 0.35);
+      fillLight.position.set(-5, 2.5, -2);
+      const rimLight = new THREE.DirectionalLight(0xffffff, 0.55);
+      rimLight.position.set(-2, 4.5, -5);
+      scene.add(keyLight, fillLight, rimLight);
+
+      /* ================================================================
+         2. THE DIE — rounded-cube geometry with 6 material groups
+         ================================================================ */
+      const DIE_SIZE = 2.4;       // edge length in world units
+      const CORNER_RADIUS = 0.24; // rounded edge / corner radius
+      const FACE_SEGMENTS = 16;   // grid resolution per face (bevel smoothness)
+
+      // Standard die: opposite faces add up to 7. Each face stores its outward
+      // normal and a right-handed tangent frame (tU × tV = normal) so triangle
+      // winding and UV orientation stay consistent across all six sides.
+      const FACE_DEFS = [
+        { value: 1, normal: [0, 1, 0],  tU: [0, 0, 1],  tV: [1, 0, 0] },
+        { value: 6, normal: [0, -1, 0], tU: [1, 0, 0],  tV: [0, 0, 1] },
+        { value: 2, normal: [0, 0, 1],  tU: [1, 0, 0],  tV: [0, 1, 0] },
+        { value: 5, normal: [0, 0, -1], tU: [0, 1, 0],  tV: [1, 0, 0] },
+        { value: 3, normal: [1, 0, 0],  tU: [0, 0, -1], tV: [0, 1, 0] },
+        { value: 4, normal: [-1, 0, 0], tU: [0, 0, 1],  tV: [0, 1, 0] },
+      ];
+      const FACE_NORMALS = {};
+      FACE_DEFS.forEach((f) => {
+        FACE_NORMALS[f.value] = new THREE.Vector3(f.normal[0], f.normal[1], f.normal[2]);
+      });
+
+      // A cube with rounded edges: each grid point is a point on the full cube
+      // face. It is projected onto the inner box (half size minus radius) and
+      // pushed back out along the local surface normal by the corner radius.
+      // Flat regions stay perfectly flat, so the pip texture maps linearly and
+      // the pips land exactly where they are drawn; shared edges get identical
+      // positions and normals from both neighbouring faces — no seams.
+      function buildRoundedDieGeometry(size, radius, segments) {
+        const half = size / 2, inner = half - radius;
+        const positions = [], normals = [], uvs = [], indices = [], groups = [];
+        const row = segments + 1;
+
+        FACE_DEFS.forEach((face, materialIndex) => {
+          const n = new THREE.Vector3(face.normal[0], face.normal[1], face.normal[2]);
+          const tU = new THREE.Vector3(face.tU[0], face.tU[1], face.tU[2]);
+          const tV = new THREE.Vector3(face.tV[0], face.tV[1], face.tV[2]);
+          const base = positions.length / 3;
+          const indexStart = indices.length;
+
+          for (let j = 0; j <= segments; j++) {
+            for (let i = 0; i <= segments; i++) {
+              const a = (i / segments) * 2 - 1;
+              const b = (j / segments) * 2 - 1;
+              // point on the full cube face…
+              const sx = (n.x + tU.x * a + tV.x * b) * half;
+              const sy = (n.y + tU.y * a + tV.y * b) * half;
+              const sz = (n.z + tU.z * a + tV.z * b) * half;
+              // …projected onto the inner box, then pushed back out along the
+              // local surface normal: faces stay perfectly flat (pip textures
+              // map linearly, pips sit true) and neighbouring faces meet the
+              // shared bevels with identical positions + normals (no seams).
+              const wx = THREE.MathUtils.clamp(sx, -inner, inner);
+              const wy = THREE.MathUtils.clamp(sy, -inner, inner);
+              const wz = THREE.MathUtils.clamp(sz, -inner, inner);
+              let ex = sx - wx, ey = sy - wy, ez = sz - wz;
+              const el = Math.sqrt(ex * ex + ey * ey + ez * ez); // ≥ radius
+              ex /= el; ey /= el; ez /= el;
+              positions.push(wx + ex * radius, wy + ey * radius, wz + ez * radius);
+              normals.push(ex, ey, ez);
+              uvs.push((a + 1) / 2, (b + 1) / 2);
+            }
+          }
+          for (let j = 0; j < segments; j++) {
+            for (let i = 0; i < segments; i++) {
+              const p0 = base + j * row + i, p1 = p0 + 1, p2 = p0 + row, p3 = p2 + 1;
+              indices.push(p0, p1, p3, p0, p3, p2); // CCW seen from outside
+            }
+          }
+          groups.push([indexStart, indices.length - indexStart, materialIndex]);
+        });
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+        geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        groups.forEach((g) => geo.addGroup(g[0], g[1], g[2]));
+        return geo;
+      }
+
+
+      // Pip patterns in face-space (0–1): the standard arrangements for 1–6.
+      // Quarter-point positions (0.25 / 0.5 / 0.75) — the standard die layout.
+      // UVs map linearly across the full face, so these land exactly on the
+      // flat area, evenly spaced like a real die.
+      const PIP_LAYOUTS = {
+        1: [[0.5, 0.5]],
+        2: [[0.25, 0.25], [0.75, 0.75]],
+        3: [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]],
+        4: [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]],
+        5: [[0.25, 0.25], [0.75, 0.25], [0.5, 0.5], [0.25, 0.75], [0.75, 0.75]],
+        6: [[0.25, 0.25], [0.25, 0.5], [0.25, 0.75], [0.75, 0.25], [0.75, 0.5], [0.75, 0.75]],
+      };
+
+      // Paint one face onto a canvas — the colour map (ivory body, glossy black
+      // pips) or the bump map (pips = dark, i.e. "recessed", spots on white).
+      function drawFace(value, isBump) {
+        const S = 512;
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = S;
+        const ctx = canvas.getContext('2d');
+
+        if (isBump) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, S, S);
+        } else {
+          ctx.fillStyle = '#f7f2e6'; // warm ivory body
+          ctx.fillRect(0, 0, S, S);
+          // faint centre sheen + edge vignette so rounded bevels shade naturally
+          const shade = ctx.createRadialGradient(S / 2, S / 2, S * 0.22, S / 2, S / 2, S * 0.74);
+          shade.addColorStop(0, 'rgba(255,255,255,0.10)');
+          shade.addColorStop(0.6, 'rgba(0,0,0,0)');
+          shade.addColorStop(1, 'rgba(84,70,48,0.16)');
+          ctx.fillStyle = shade;
+          ctx.fillRect(0, 0, S, S);
+        }
+
+        const r = S * (value === 1 ? 0.085 : 0.074); // the lone pip is slightly bigger
+        PIP_LAYOUTS[value].forEach((pip) => {
+          const x = pip[0] * S, y = pip[1] * S;
+          let g;
+          if (isBump) {
+            g = ctx.createRadialGradient(x, y, r * 0.15, x, y, r * 1.2);
+            g.addColorStop(0, '#000000');
+            g.addColorStop(0.7, '#262626');
+            g.addColorStop(1, '#ffffff');
+            ctx.fillStyle = g;
+            ctx.beginPath(); ctx.arc(x, y, r * 1.2, 0, Math.PI * 2); ctx.fill();
+          } else {
+            g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.08, x, y, r);
+            g.addColorStop(0, '#4a4d55'); // soft sheen inside the divot
+            g.addColorStop(0.55, '#191b20');
+            g.addColorStop(1, '#0c0d10');
+            ctx.fillStyle = g;
+            ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+          }
+        });
+        return canvas;
+      }
+
+      function makeTexture(value, isBump) {
+        const tex = new THREE.CanvasTexture(drawFace(value, isBump));
+        tex.anisotropy = MAX_ANISO;
+        if (!isBump) tex.encoding = THREE.sRGBEncoding;
+        return tex;
+      }
+
+      // One clear-coated physical material per face so each carries its own pips.
+      const faceMaterials = FACE_DEFS.map((face) => new THREE.MeshPhysicalMaterial({
+        map: makeTexture(face.value, false),
+        bumpMap: makeTexture(face.value, true),
+        bumpScale: 0.04,           // shallow "drilled" pips
+        roughness: 0.33,
+        metalness: 0.0,
+        clearcoat: 0.55,           // lacquered-plastic highlight
+        clearcoatRoughness: 0.32,
+      }));
+
+      const die = new THREE.Mesh(
+        buildRoundedDieGeometry(DIE_SIZE, CORNER_RADIUS, FACE_SEGMENTS),
+        faceMaterials
+      );
+      scene.add(die);
+
+      // Soft radial-gradient contact shadow — faked, but silky and artefact-free.
+      const shadowTexture = (() => {
+        const S = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = S;
+        const ctx = canvas.getContext('2d');
+        const g = ctx.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+        g.addColorStop(0, 'rgba(0,0,0,0.6)');
+        g.addColorStop(0.5, 'rgba(0,0,0,0.3)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, S, S);
+        return new THREE.CanvasTexture(canvas);
+      })();
+      const shadowMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(DIE_SIZE * 1.75, DIE_SIZE * 1.75),
+        new THREE.MeshBasicMaterial({ map: shadowTexture, transparent: true, depthWrite: false })
+      );
+      shadowMesh.rotation.x = -Math.PI / 2;
+      shadowMesh.position.y = -DIE_SIZE * 0.72;
+      scene.add(shadowMesh);
+
+      /* ================================================================
+         3. INTERACTION — drag to spin (with inertia), idle auto-rotate
+         ================================================================ */
+      const UP = new THREE.Vector3(0, 1, 0);
+      const AXIS_X = new THREE.Vector3(1, 0, 0);
+      const AXIS_Y = new THREE.Vector3(0, 1, 0);
+      const DRAG_SENS = 0.0055;  // radians per pixel
+      const IDLE_DELAY = 2200;   // ms of stillness before auto-rotation fades in
+      const REDUCED_MOTION = window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      let dragging = false, activePointer = null;
+      let lastX = 0, lastY = 0, lastMoveT = 0, movedPx = 0, downT = 0;
+      let yawVel = 0, pitchVel = 0;      // angular velocity (rad/s) → inertia
+      let lastInteraction = performance.now();
+      let idleBlend = 0;
+
+      const _qA = new THREE.Quaternion(), _qB = new THREE.Quaternion();
+
+      // Small world-space rotation: the die tumbles around the world axes,
+      // just like pushing it with a finger.
+      function rotateWorld(yaw, pitch) {
+        _qA.setFromAxisAngle(AXIS_Y, yaw);
+        _qB.setFromAxisAngle(AXIS_X, pitch);
+        die.quaternion.premultiply(_qA).premultiply(_qB);
+      }
+
+      container.addEventListener('pointerdown', (e) => {
+        if (rolling) return;
+        dragging = true;
+        activePointer = e.pointerId;
+        try { container.setPointerCapture(e.pointerId); } catch (_) {}
+        container.classList.add('dragging');
+        lastX = e.clientX; lastY = e.clientY;
+        lastMoveT = e.timeStamp; movedPx = 0; downT = performance.now();
+        yawVel = pitchVel = 0;
+        idleBlend = 0;
+        lastInteraction = performance.now();
+      });
+
+      container.addEventListener('pointermove', (e) => {
+        if (!dragging || e.pointerId !== activePointer) return;
+        const dx = e.clientX - lastX, dy = e.clientY - lastY;
+        lastX = e.clientX; lastY = e.clientY;
+        movedPx += Math.abs(dx) + Math.abs(dy);
+        const yaw = dx * DRAG_SENS, pitch = dy * DRAG_SENS;
+        rotateWorld(yaw, pitch);
+        const dt = Math.max(4, e.timeStamp - lastMoveT) / 1000;
+        lastMoveT = e.timeStamp;
+        yawVel = THREE.MathUtils.lerp(yawVel, yaw / dt, 0.35);   // smoothed velocity
+        pitchVel = THREE.MathUtils.lerp(pitchVel, pitch / dt, 0.35);
+        lastInteraction = performance.now();
+      });
+
+      function endDrag(e) {
+        if (!dragging || e.pointerId !== activePointer) return;
+        dragging = false;
+        container.classList.remove('dragging');
+        lastInteraction = performance.now();
+        const speed = Math.hypot(yawVel, pitchVel);       // clamp wild flicks
+        if (speed > 9) { yawVel *= 9 / speed; pitchVel *= 9 / speed; }
+        if (movedPx < 6 && performance.now() - downT < 450) {  // a tap → roll
+          yawVel = pitchVel = 0;
+          rollDie();
+        }
+      }
+      container.addEventListener('pointerup', endDrag);
+      container.addEventListener('pointercancel', endDrag);
+
+      /* ================================================================
+         4. ROLLING LOGIC — random face, tumble in the air, clean landing
+         ================================================================ */
+      let rolling = false;
+      const rollFrom = new THREE.Quaternion(), rollTo = new THREE.Quaternion();
+      const tumbleAxis = new THREE.Vector3();
+      let tumbleTotal = 0, rollStartT = 0, rollDuration = 0, rolledValue = 1;
+      const HOP_HEIGHT = 0.5;
+
+      const rollButton = document.getElementById('rollButton');
+      const resultEl = document.getElementById('result');
+      const resultValueEl = document.getElementById('resultValue');
+      const historyEl = document.getElementById('history');
+
+      function rollDie() {
+        if (rolling) return;
+        rolling = true;
+        rollButton.disabled = true;
+        yawVel = pitchVel = 0;
+        idleBlend = 0;
+
+        // 1) Pick a random face and build the orientation that lands it
+        //    face-up: rotate its normal onto world-up, then add a random
+        //    twist around up so every roll looks different.
+        const value = 1 + Math.floor(Math.random() * 6);
+        const align = new THREE.Quaternion().setFromUnitVectors(FACE_NORMALS[value], UP);
+        const twist = new THREE.Quaternion().setFromAxisAngle(UP, Math.random() * Math.PI * 2);
+        rollFrom.copy(die.quaternion);
+        rollTo.copy(twist).multiply(align);
+
+        // 2) A multi-turn tumble around a random axis (its angle decays to
+        //    zero) plus a little hop → the die spins in the air and settles
+        //    exactly on the chosen face.
+        tumbleAxis.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
+        tumbleTotal = (2 + Math.random() * 2) * Math.PI * 2;
+        rollDuration = REDUCED_MOTION ? 450 : 1050 + Math.random() * 300;
+        rollStartT = performance.now();
+        rolledValue = value;
+      }
+
+      function showResult(value) {
+        resultValueEl.textContent = value;
+        resultEl.classList.add('show');
+        resultValueEl.classList.remove('pop');
+        void resultValueEl.offsetWidth;   // force reflow → restart the pop animation
+        resultValueEl.classList.add('pop');
+
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        chip.textContent = value;
+        historyEl.insertBefore(chip, historyEl.firstChild);
+        while (historyEl.children.length > 6) historyEl.removeChild(historyEl.lastChild);
+      }
+
+      function onRollEnd() {
+        rolling = false;
+        rollButton.disabled = false;
+        lastInteraction = performance.now();
+        showResult(rolledValue);
+      }
+
+      rollButton.addEventListener('click', () => { rollDie(); rollButton.blur(); });
+      window.addEventListener('keydown', (e) => {
+        if (e.repeat) return;
+        if (e.code === 'Space' || e.code === 'Enter' || e.code === 'KeyR') {
+          if (document.activeElement === rollButton) return; // button handles its own click
+          e.preventDefault();
+          rollDie();
+        }
+      });
+
+      /* ================================================================
+         5. RENDER LOOP — roll animation, inertia, idle spin, resize
+         ================================================================ */
+      const clock = new THREE.Clock();
+      const startTime = performance.now();
+      let introDone = REDUCED_MOTION;
+
+      function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+      function animate() {
+        requestAnimationFrame(animate);
+        const dt = Math.min(clock.getDelta(), 0.05);
+        const now = performance.now();
+
+        // little "pop in" when the page loads
+        if (!introDone) {
+          const k = Math.min(1, (now - startTime) / 700);
+          die.scale.setScalar(0.85 + 0.15 * easeOutCubic(k));
+          if (k >= 1) introDone = true;
+        }
+
+        if (rolling) {
+          // Slerp toward the landing orientation while the extra tumble spin
+          // decays quadratically → exactly the target orientation at t = 1.
+          const t = Math.min(1, (now - rollStartT) / rollDuration);
+          _qA.copy(rollFrom).slerp(rollTo, easeOutCubic(t));
+          _qB.setFromAxisAngle(tumbleAxis, Math.pow(1 - t, 2) * tumbleTotal);
+          die.quaternion.copy(_qB.multiply(_qA));
+          die.position.y = HOP_HEIGHT * Math.sin(Math.PI * t);
+          if (t >= 1) {
+            die.quaternion.copy(rollTo);  // land precisely on the rolled face
+            die.position.y = 0;
+            onRollEnd();
+          }
+        } else {
+          // inertia after a flick, with exponential damping
+          if (!dragging && (Math.abs(yawVel) > 0.02 || Math.abs(pitchVel) > 0.02)) {
+            rotateWorld(yawVel * dt, pitchVel * dt);
+            const damp = Math.exp(-3.2 * dt);
+            yawVel *= damp; pitchVel *= damp;
+            lastInteraction = now;
+          }
+          // gentle auto-rotation while idle
+          const idle = !dragging && !REDUCED_MOTION &&
+            (now - lastInteraction > IDLE_DELAY) &&
+            Math.abs(yawVel) <= 0.02 && Math.abs(pitchVel) <= 0.02;
+          idleBlend = THREE.MathUtils.clamp(idleBlend + (idle ? 1 : -1) * dt * 1.4, 0, 1);
+          if (idleBlend > 0) {
+            rotateWorld(0.22 * dt * idleBlend, 0.05 * dt * idleBlend * Math.sin(now * 0.0007));
+          }
+        }
+
+        // contact shadow shrinks & fades while the die is in the air
+        const h = die.position.y;
+        shadowMesh.material.opacity = Math.max(0, 1 - h * 1.05);
+        shadowMesh.scale.setScalar(Math.max(0.6, 1 - h * 0.22));
+
+        renderer.render(scene, camera);
+      }
+
+      function updateCamera() {
+        // pull back on narrow/portrait screens so the die always fits
+        const distFactor = THREE.MathUtils.clamp(1.35 / camera.aspect, 1, 2.3);
+        camera.position.copy(CAM_DIR).multiplyScalar(BASE_DIST * distFactor);
+        camera.lookAt(0, -0.3, 0);
+      }
+
+      window.addEventListener('resize', () => {
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        updateCamera();
+      });
+
+      updateCamera();
+      animate();
+
+    } catch (err) {
+      fail('Could not start WebGL — your browser or GPU may not support it. (' + err.message + ')');
+    }
+  })();
+  </script>
+</body>
+</html>
